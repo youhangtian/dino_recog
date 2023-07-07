@@ -1,0 +1,32 @@
+output: output
+log_freq: 100
+image_writer_freq: 100
+
+data:
+  batch_size: 4
+  num_workers: 8
+  image_folder: /mnt/data/luperson/images
+  resize: [384, 128]
+  local_crops_number: 8
+  megaface_data_root: /mnt/data/reid/MSMT17
+  megaface_face_folders: persons2,persons3
+
+model:
+  network: vit_s 
+  fp16: True 
+  input_size: [384, 128]
+  patch_size: 16 
+  num_features: 512 
+  out_dim: 65536 
+  ckpt: False
+
+train:
+  epochs: 100
+  save_epoch: 5
+  warmup_epochs: 10
+  optimizer: adamw
+  lr: 0.0005
+  lr_end: 0.000001
+  weight_decay: 0.04
+  weight_decay_end: 0.4
+  momentum_teacher: 0.996
