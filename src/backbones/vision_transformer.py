@@ -17,18 +17,6 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
         tensor.add_(mean)
         tensor.clamp_(min=a, max=b)
         return tensor 
-    
-
-def drop_path(x, drop_prob=0., training=False):
-    if drop_prob == 0. or not training:
-        return x 
-    
-    keep_prob = 1 - drop_prob 
-    shape = (x.shape[0],) + (1,) * (x.ndim - 1)
-    random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
-    random_tensor.floor_()
-    output = x.div(keep_prob) * random_tensor 
-    return output 
 
 
 class DropPath(nn.Module):
@@ -37,7 +25,15 @@ class DropPath(nn.Module):
         self.drop_prob = drop_prob 
 
     def forward(self, x):
-        return drop_path(x, self.drop_prob, self.training)
+        if self.drop_prob == 0. or not self.training:
+            return x 
+        
+        keep_prob = 1 - self.drop_prob 
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor.floor_()
+        output = x.div(keep_prob) * random_tensor
+        return output 
     
 
 class Mlp(nn.Module):
@@ -138,28 +134,13 @@ class PatchEmbed(nn.Module):
                  in_chans=3,
                  embed_dim=768):
         super().__init__()
-        num_patches = (input_size[0] // patch_size) * (input_size[1] // patch_size)
         self.input_size = input_size 
         self.patch_size = patch_size  
-        self.num_patches = num_patches 
+        self.num_patches = (input_size[0] // patch_size) * (input_size[1] // patch_size) 
 
-        # self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-
-        out_chans = [32, 128, 512]
-
-        self.conv_down = nn.Sequential(*[
-            nn.Conv2d(in_chans, out_chans[0], kernel_size=3, stride=2, padding=1, bias=False),
-            nn.PReLU(out_chans[0]),
-            nn.Conv2d(out_chans[0], out_chans[1], kernel_size=3, stride=2, padding=1, bias=False),
-            nn.PReLU(out_chans[1]),
-            nn.Conv2d(out_chans[1], out_chans[2], kernel_size=3, stride=2, padding=1, bias=False),
-            nn.PReLU(out_chans[2])
-        ])
-
-        self.proj = nn.Conv2d(out_chans[2], embed_dim, kernel_size=patch_size//8, stride=patch_size//8)
+        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        x = self.conv_down(x)
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x 
     
@@ -179,7 +160,7 @@ class VisionTransformer(nn.Module):
                  qk_scale=None,
                  drop_rate=0.,
                  attn_drop_rate=0.,
-                 drop_path_rate=0.,
+                 drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm):
         super().__init__()
         self.fp16 = fp16
@@ -216,7 +197,7 @@ class VisionTransformer(nn.Module):
         ])
         self.norm = norm_layer(embed_dim)
 
-        self.features = nn.Linear(embed_dim, num_features)
+        self.features = nn.Linear(embed_dim, num_features, bias=False)
 
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
@@ -270,6 +251,7 @@ class VisionTransformer(nn.Module):
             x = self.norm(x)
 
             features = self.features(x[:, 0])
+            attn = attn[:, :, 0, 1:]
 
         if self.fp16:
             features = features.float()
@@ -278,7 +260,6 @@ class VisionTransformer(nn.Module):
         features = nn.functional.normalize(features, dim=-1, p=2)
         
         if return_attention:
-            return features, attn 
+            return features, attn
         else:
             return features 
-        

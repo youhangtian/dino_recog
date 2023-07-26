@@ -2,8 +2,9 @@ import os
 import math 
 import random 
 import torch 
-from PIL import ImageFilter, ImageOps
+import cv2 
 import numpy as np 
+from PIL import Image, ImageFilter, ImageOps
 
 from torchvision import datasets, transforms 
 
@@ -21,9 +22,12 @@ def get_dataloader(cfg, shuffle=True, drop_last=True):
     transform = DataAugmentationDINO(
         global_resize,
         local_resize,
+        global_crops_scale=cfg.global_crops_scale,
+        local_crops_scale=cfg.local_crops_scale,
         local_crops_number=cfg.local_crops_number
     )
-    dataset = datasets.ImageFolder(cfg.image_folder, transform=transform)
+
+    dataset = CustomImageFolderDataset(cfg.image_folder, transform)
 
     rank, world_size = get_dist_info()
     sampler = DistSampler(dataset, seed, world_size, rank, shuffle)
@@ -74,12 +78,29 @@ def setup_seed(device='cuda', cuda_deterministic=False):
     return seed 
 
 
+class CustomImageFolderDataset(datasets.ImageFolder):
+    def __init__(self, root, transform):
+        super(CustomImageFolderDataset, self).__init__(root, transform)
+
+        self.root = root
+        self.transform = transform 
+
+    def __getitem__(self, index):
+        path, target = self.samples[index]
+        img_bgr = cv2.imread(path)
+
+        img = Image.fromarray(img_bgr.astype(np.uint8))
+        sample = self.transform(img)
+
+        return sample, target
+    
+
 class DataAugmentationDINO(object):
     def __init__(self,
                  global_resize,
                  local_resize,
-                 global_crops_scale=(0.8, 1.0),
-                 local_crops_scale=(0.05, 0.8),
+                 global_crops_scale=(0.5, 1.0),
+                 local_crops_scale=(0.05, 0.5),
                  local_crops_number=8):
         flip_and_color_jitter = transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
@@ -100,6 +121,9 @@ class DataAugmentationDINO(object):
         
         local_ratio = (local_resize[1] * 0.75 / local_resize[0],
                        local_resize[1] * 1.3333 / local_resize[0])
+
+        global_crops_scale = (global_crops_scale[0], global_crops_scale[1])
+        local_crops_scale = (local_crops_scale[0], local_crops_scale[1])
         
         self.global_trans1 = transforms.Compose([
             transforms.RandomResizedCrop(global_resize, 

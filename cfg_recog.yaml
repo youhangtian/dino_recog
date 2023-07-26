@@ -4,7 +4,7 @@ image_writer_freq: 100
 
 data:
   batch_size: 64
-  num_workers: 8
+  num_workers: 16
   resize: [112, 112]
   image_folder: /mnt/data/faces/ms1m
   sample_rate: 1.0
@@ -12,7 +12,7 @@ data:
   megaface_face_folders: faces,facescrub_images,megaface_images
 
 model:
-  network: swin 
+  network: vit_s
   fp16: True 
   input_size: [112, 112]
   patch_size: 8
@@ -20,10 +20,10 @@ model:
   ckpt: False 
 
 train:
-  num_epoch: 22 
-  save_epoch: 5
+  num_epoch: 100 
+  save_epoch: 10
   lock_epoch: 0
-  warmup_epoch: 2
+  warmup_epoch: 10
   lr: 0.001 
   loss: arcface
   margin_list: [64.0, 0.4]

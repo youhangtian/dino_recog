@@ -1,6 +1,8 @@
 import os 
+import sys 
 import argparse 
 
+import math
 import cv2
 import numpy as np 
 from tqdm import tqdm
@@ -72,10 +74,10 @@ def main(cfg):
     if logger: logger.info(f'config: ------\n{cfg} ------')
 
     if logger: logger.info(f'get dataloader ------\n{cfg.data} ------')
-    data_loader = get_dataloader(cfg.data)
+    data_loader = get_dataloader(cfg.data, logger=logger)
 
     if logger: logger.info(f'get backbone: ------\n{cfg.model} ------')
-    backbone = get_backbone(cfg.model).cuda()
+    backbone = get_backbone(cfg.model, logger=logger).cuda()
 
     backbone = torch.nn.parallel.DistributedDataParallel(
         module=backbone,
@@ -167,6 +169,10 @@ def main(cfg):
 
             loss = module_partial_fc(embeddings, labels)
 
+            if not math.isfinite(loss.item()):
+                logger.error(f'loss is {loss.item()}, stopping training ------')
+                sys.exit(1)
+
             opt.zero_grad()
             if cfg.model.fp16:
                 scaler.scale(loss).backward()
@@ -222,23 +228,23 @@ def main(cfg):
                         if 'vit' in cfg.model.network:
                             attn = attn.detach().cpu()
                             attn_arr = torch.cat([attn[idx].unsqueeze(0) for idx in [max_x, max_y, min_x, min_y]])
-                            num, num_heads, _, _ = attn_arr.shape 
+                            num, num_heads, _ = attn_arr.shape 
                             input_size = cfg.model.input_size 
                             patch_size = cfg.model.patch_size 
-                            attn_arr = attn_arr[:, :, 0, 1:].reshape(num, num_heads, input_size[0]//patch_size, input_size[1]//patch_size)
+                            attn_arr = attn_arr.reshape(num, num_heads, input_size[0]//patch_size, input_size[1]//patch_size)
                             attn_arr = nn.functional.interpolate(attn_arr, scale_factor=patch_size, mode='nearest').numpy()
 
                             attn_arr_sum = []
                             for j in range(len(attn_arr)):
                                 arr_sum = sum(attn_arr[j][k] * 1.0 / num_heads for k in range(num_heads))
-                                arr_sum = (arr_sum - arr_sum.min()) / max(arr_sum.max() - arr_sum.min(), 1e-6) * 255 
+                                arr_sum = arr_sum / arr_sum.max() * 255 
                                 attn_arr_sum.append(arr_sum.astype('uint8'))
 
                             attn_img1 = np.concatenate((attn_arr_sum[0], attn_arr_sum[1]))
                             attn_img2 = np.concatenate((attn_arr_sum[2], attn_arr_sum[3]))
                             attn_concat_img = np.concatenate((attn_img1, attn_img2), axis=1)
 
-                            writer.add_image(f'train/heatmap', attn_concat_img, dataformats='HW')
+                            writer.add_image(f'train/heatmap', attn_concat_img, steps, dataformats='HW')
 
             if (steps % cfg.log_freq == 0) and logger:
                 msg = f'[epoch{epoch}] steps {steps}, lr {last_lr:.6f}, loss {loss_am.avg:.4f} ------'
@@ -261,6 +267,7 @@ def main(cfg):
     if RANK == 0:
         backbone.eval()
         save_model(backbone, cfg.output, f'backbone_final', save_onnx=False)
+    if writer: writer.close()
 
     distributed.destroy_process_group()
     if logger: logger.info(f'training done, best acc arr: {best_acc} ------')

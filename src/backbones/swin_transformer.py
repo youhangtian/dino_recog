@@ -22,17 +22,10 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
 class PatchEmbed(nn.Module):
     def __init__(self, in_chans, embed_dims, patch_size):
         super().__init__()
-        self.conv_down = nn.Sequential(*[
-            nn.Conv2d(in_chans, 32, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.PReLU(32)
-        ])
-
-        self.proj = nn.Conv2d(32, embed_dims, kernel_size=3, stride=patch_size//2, padding=1, bias=False)
-
+        self.proj = nn.Conv2d(in_chans, embed_dims, kernel_size=patch_size, stride=patch_size)
         self.norm = nn.LayerNorm(embed_dims)
 
     def forward(self, x):
-        x = self.conv_down(x)
         x = self.proj(x)
         out_size = (x.shape[2], x.shape[3])
         x = x.flatten(2).transpose(1, 2)

@@ -11,6 +11,8 @@ from torch import nn
 from torch import distributed 
 from torch.utils.tensorboard import SummaryWriter
 
+import matplotlib.pyplot as plt
+
 from src.utils import get_config_from_yaml, get_logger, AverageMeter
 from src.backbones import get_backbone
 from src.megaface_test import get_mega_dataloader, get_acc
@@ -74,7 +76,7 @@ def main(cfg):
     dino_loss = DINOLoss(
         cfg.model.out_dim,
         cfg.data.local_crops_number + 2,
-        cfg.train.epochs
+        cfg.train
     ).cuda()
 
     if logger: logger.info(f'get optimzer {cfg.train.optimizer} ------')
@@ -87,7 +89,7 @@ def main(cfg):
         raise ValueError(f'do not support optimiizer {cfg.train.optimizer}')
     
     lr_scheduler = cosine_scheduler(
-        cfg.train.lr,
+        cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
         cfg.train.lr_end,
         cfg.train.epochs,
         len(data_loader),
@@ -148,7 +150,7 @@ def main(cfg):
             loss = dino_loss(student_output, teacher_output, epoch)
 
             if not math.isfinite(loss.item()):
-                logger.error(f'loss is {loss.item()}, stopping training ------')
+                if logger: logger.error(f'loss is {loss.item()}, stopping training ------')
                 sys.exit(1)
             if loss_am is not None: loss_am.update(loss.item())
 
@@ -157,15 +159,17 @@ def main(cfg):
                 loss.backward()
             else:
                 fp16_scaler.scale(loss).backward()
+                fp16_scaler.unscale_(optimizer)
 
             for name, p in student.named_parameters():
+                clip_grad = 3.0
                 if p.grad is not None:
                     param_norm = p.grad.data.norm(2)
-                    clip_coef = 3.0 / (param_norm + 1e-6)
+                    clip_coef = clip_grad / (param_norm + 1e-6)
                     if clip_coef < 1:
                         p.grad.data.mul_(clip_coef)
 
-                if epoch < 1:
+                if epoch < cfg.train.lock_last_layer:
                     if 'last_layer' in name:
                         p.grad = None 
 
@@ -194,45 +198,62 @@ def main(cfg):
                         img_arr[j] = (img_arr[j] * 0.5 + 0.5) * 255
                         img_arr[j] = img_arr[j].astype('uint8')
 
-                    img1 = np.concatenate(img_arr[:2], axis=1)
-                    img2 = np.concatenate(img_arr[2:], axis=1)
+                    img1 = np.concatenate(img_arr[:2], axis=1)[:,:,::-1]
+                    img2 = np.concatenate(img_arr[2:], axis=1)[:,:,::-1]
                     writer.add_image(f'image/global_image', img1, steps, dataformats='HWC')
                     writer.add_image(f'image/local_image', img2, steps, dataformats='HWC')
 
-                    if 'vit' in cfg.model.network:
-                        with torch.no_grad():
+                    with torch.no_grad():
+                        t_center = dino_loss.center.detach().cpu().numpy()[0]
+                        t_out = teacher_output[0].detach().cpu().numpy()
+                        s_out = student_output[-1].detach().cpu().numpy()
+
+                        fig0 = plt.figure()
+                        fig0.suptitle('teacher center')
+                        plt.scatter(range(len(t_center)), t_center)
+                        fig1 = plt.figure()
+                        fig1.suptitle('teacher output')
+                        plt.scatter(range(len(t_out)), t_out)
+                        fig2 = plt.figure()
+                        fig2.suptitle('student output')
+                        plt.scatter(range(len(s_out)), s_out)
+                        writer.add_figure(f'figure/teacher_center', fig0, steps)
+                        writer.add_figure(f'figure/teacher', fig1, steps)
+                        writer.add_figure(f'figure/student', fig2, steps)
+
+                        if 'vit' in cfg.model.network:
                             attn_arr = teacher_attn.detach()[::imgs[0].shape[0]].cpu()
-                            num, num_heads, _, _ = attn_arr.shape
+                            num, num_heads, _ = attn_arr.shape
                             img_size = cfg.model.input_size
                             patch_size = cfg.model.patch_size
-                            attn_arr = attn_arr[:, :, 0, 1:].reshape(num, num_heads, img_size[0]//patch_size, img_size[1]//patch_size)
+                            attn_arr = attn_arr.reshape(num, num_heads, img_size[0]//patch_size, img_size[1]//patch_size)
                             attn_arr = nn.functional.interpolate(attn_arr, scale_factor=patch_size, mode='nearest').numpy()
                             
                             attn_arr_sum = []
                             for j in range(len(attn_arr)):
                                 arr_sum = sum(attn_arr[j][k] * 1.0 / num_heads for k in range(num_heads))
-                                arr_sum = (arr_sum - arr_sum.min()) / max(arr_sum.max() - arr_sum.min(), 1e-6) * 255 
+                                arr_sum = arr_sum / arr_sum.max() * 255 
                                 attn_arr_sum.append(arr_sum.astype('uint8'))
 
-                        img3 = np.concatenate(attn_arr_sum, axis=1)
-                        writer.add_image(f'image/attn_image', img3, steps, dataformats='HW')
+                            img3 = np.concatenate(attn_arr_sum, axis=1)
+                            writer.add_image(f'image/attn_image', img3, steps, dataformats='HW')
 
             if steps % cfg.log_freq == 0 and logger:
                 msg = f'[epoch{epoch}] steps {steps}, lr {optimizer.param_groups[0]["lr"]:.6f}, loss {loss_am.avg:.4f}'
                 logger.info(msg)
 
         if len(face_folders) > 1 and RANK == 0:
-            teacher.backbone.eval()
             acc_arr = get_acc(teacher.backbone, cfg.model.network, face_dataloaders[:-1], face_dataloaders[-1], print_info=False)
             for i in range(len(face_folders) - 1):
                 if logger: logger.info(f'[epoch{epoch}][megaface_test][{face_folders[i]}] acc {acc_arr[i]*100:.4f} ------')
-                if writer: writer.add_scalar(f'test/{face_folders[i]}', acc_arr[i], epoch)
+                if writer: writer.add_scalar(f'train/test_{face_folders[i]}', acc_arr[i], epoch)
 
                 if acc_arr[i] > best_acc[face_folders[i]] and RANK == 0:
                     best_acc[face_folders[i]] = acc_arr[i]
                     save_model(student, teacher, cfg.model.input_size, cfg.output, f'best_{face_folders[i]}', save_onnx=True)
 
-    save_model(student, teacher, cfg.model.input_size, cfg.output, 'final', save_onnx=False)
+    if RANK == 0: save_model(student, teacher, cfg.model.input_size, cfg.output, 'final', save_onnx=False)
+    if writer: writer.close()
     
     distributed.destroy_process_group()
     if logger: logger.info('traing done ------')

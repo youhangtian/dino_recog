@@ -4,9 +4,11 @@ image_writer_freq: 100
 
 data:
   batch_size: 4
-  num_workers: 8
+  num_workers: 16
   image_folder: /mnt/data/luperson/images
   resize: [384, 128]
+  global_crops_scale: [0.5, 1.0]
+  local_crops_scale: [0.05, 0.5]
   local_crops_number: 8
   megaface_data_root: /mnt/data/reid/MSMT17
   megaface_face_folders: persons2,persons3
@@ -22,11 +24,17 @@ model:
 
 train:
   epochs: 100
-  save_epoch: 5
+  save_epoch: 10
   warmup_epochs: 10
+  lock_last_layer: 1
   optimizer: adamw
   lr: 0.0005
   lr_end: 0.000001
   weight_decay: 0.04
   weight_decay_end: 0.4
   momentum_teacher: 0.996
+  warmup_teacher_temp_epochs: 0
+  warmup_teacher_temp: 0.04
+  teacher_temp: 0.04
+  student_temp: 0.1
+  center_momentum: 0.9

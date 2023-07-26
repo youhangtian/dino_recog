@@ -1,9 +1,10 @@
 import os
 import math
 import random 
-import numpy as np
 import torch 
-from PIL import Image, ImageFilter, ImageOps 
+import cv2 
+import numpy as np
+from PIL import Image
 
 from torchvision import datasets, transforms
 
@@ -12,28 +13,20 @@ from torch.utils.data import DistributedSampler, DataLoader
 import torch.distributed as dist 
 
 
-def get_dataloader(cfg, shuffle=True, drop_last=True):
+def get_dataloader(cfg, shuffle=True, drop_last=True, logger=None):
     seed = setup_seed()
+    if logger: logger.info(f'data loader seed {seed} ------')
 
     transform = transforms.Compose([
-        ConvertColor(), 
-        transforms.RandomApply(torch.nn.ModuleList([
-            transforms.Resize((cfg.resize[0] // 2, cfg.resize[1] // 2)),
-        ]), p=0.5), 
-        transforms.Resize((cfg.resize[0], cfg.resize[1])), 
         transforms.RandomHorizontalFlip(p=0.5), 
         transforms.RandomApply(torch.nn.ModuleList([
             transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.0)
         ]), p=0.5), 
-        # transforms.RandomGrayscale(p=0.1), 
-        GaussianBlur(0.5), 
-        # Solarization(0.2), 
         transforms.ToTensor(), 
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)), 
-        transforms.RandomErasing(p=0.5, scale=(0.1, 0.5)), 
     ])
 
-    dataset = datasets.ImageFolder(cfg.image_folder, transform=transform)
+    dataset = CustomImageFolderDataset(cfg.image_folder, transform, cfg)
 
     rank, world_size = get_dist_info()
     sampler = DistSampler(dataset, seed, world_size, rank, shuffle)
@@ -84,39 +77,51 @@ def setup_seed(device='cuda', cuda_deterministic=False):
 
     return seed
 
-
-class ConvertColor(object):
-    def __call__(self, img):
-        img = np.array(img)[:,:,::-1]
-        return Image.fromarray(np.uint8(img))
     
+class CustomImageFolderDataset(datasets.ImageFolder):
+    def __init__(self, root, transform, cfg):
+        super(CustomImageFolderDataset, self).__init__(root, transform, cfg)
 
-class GaussianBlur(object):
-    def __init__(self, p=0.5, radius_min=0.1, radius_max=2.):
-        self.p = p 
-        self.radius_min = radius_min 
-        self.radius_max = radius_max 
+        self.root = root 
+        self.cfg = cfg
+        self.transform = transform 
 
-    def __call__(self, img):
-        if random.random() < self.p:
-            return img.filter(
-                ImageFilter.GaussianBlur(
-                radius=random.uniform(self.radius_min, self.radius_max)
-                )
+    def __getitem__(self, index):
+        path, target = self.samples[index]
+        img_bgr = cv2.imread(path)
+
+        if np.random.random() < 0.5:
+            img_shape = img_bgr.shape 
+            side_ratio = np.random.uniform(0.3, 0.7)
+            new_shape = (int(side_ratio * img_shape[0]), int(side_ratio * img_shape[1]))
+            interpolation = np.random.choice(
+                [cv2.INTER_NEAREST, cv2.INTER_LINEAR, cv2.INTER_AREA, cv2.INTER_CUBIC, cv2.INTER_LANCZOS4]
             )
-        else:
-            return img
-        
+            img_bgr = cv2.resize(img_bgr, new_shape, interpolation=interpolation)
 
-class Solarization(object):
-    def __init__(self, p):
-        self.p = p 
+        img_bgr = cv2.resize(img_bgr, (self.cfg.resize[0], self.cfg.resize[1]))
 
-    def __call__(self, img):
-        if random.random() < self.p:
-            return ImageOps.solarize(img)
-        else:
-            return img
+        if np.random.random() < 0.5:
+            img_shape = img_bgr.shape
+
+            index_h = 0
+            while index_h < img_shape[0]:
+                h_add = np.random.randint(img_shape[0]//2) + 1
+
+                index_w = 0
+                while index_w < img_shape[1]:
+                    w_add = np.random.randint(img_shape[1]//2) + 1
+
+                    if np.random.random() < 0.5:
+                        img_bgr[index_h:index_h+h_add, index_w:index_w+w_add, :] = 112
+
+                    index_w += w_add
+                index_h += h_add 
+
+        img = Image.fromarray(img_bgr.astype(np.uint8))
+        sample = self.transform(img)
+
+        return sample, target
 
 
 class DistSampler(DistributedSampler):
