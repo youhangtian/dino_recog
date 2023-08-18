@@ -9,15 +9,16 @@ from PIL import Image, ImageFilter, ImageOps
 from torchvision import datasets, transforms 
 
 from torch.utils.data import DistributedSampler, DataLoader 
-
 import torch.distributed as dist 
 
+from .utils import make_square, rotate_img
 
-def get_dataloader(cfg, shuffle=True, drop_last=True):
+
+def get_dataloader(patch_size, input_size, cfg, shuffle=True, drop_last=True):
     seed = setup_seed()
 
-    global_resize = (cfg.resize[0], cfg.resize[1])
-    local_resize = (cfg.resize[0] // 2, cfg.resize[1] // 2)
+    global_resize = (input_size[0], input_size[1])
+    local_resize = (input_size[0] // 2, input_size[1] // 2)
 
     transform = DataAugmentationDINO(
         global_resize,
@@ -27,7 +28,7 @@ def get_dataloader(cfg, shuffle=True, drop_last=True):
         local_crops_number=cfg.local_crops_number
     )
 
-    dataset = CustomImageFolderDataset(cfg.image_folder, transform)
+    dataset = CustomImageFolderDataset(cfg, transform, patch_size, input_size)
 
     rank, world_size = get_dist_info()
     sampler = DistSampler(dataset, seed, world_size, rank, shuffle)
@@ -79,20 +80,89 @@ def setup_seed(device='cuda', cuda_deterministic=False):
 
 
 class CustomImageFolderDataset(datasets.ImageFolder):
-    def __init__(self, root, transform):
-        super(CustomImageFolderDataset, self).__init__(root, transform)
-
-        self.root = root
+    def __init__(self, cfg, transform, patch_size, input_size):
+        super(CustomImageFolderDataset, self).__init__(cfg.image_folder, transform)
+        self.root = cfg.image_folder
         self.transform = transform 
+
+        self.patch_size = patch_size 
+        self.input_size = input_size
+        self.cfg = cfg  
+
+        min_aspect = 0.3
+        max_aspect = 1.0 / 0.3
+        self.log_aspect_ratio = (math.log(min_aspect), math.log(max_aspect))
+
+        self.epoch = -1
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch 
+
+    def get_mask_ratio(self):
+        if self.epoch < self.cfg.mask_start_epoch:
+            return 0 
+        
+        assert self.cfg.mask_ratio > self.cfg.mask_ratio_var 
+
+        mask_ratio = random.uniform(
+            self.cfg.mask_ratio - self.cfg.mask_ratio_var,
+            self.cfg.mask_ratio + self.cfg.mask_ratio_var
+        ) if self.cfg.mask_ratio_var > 0 else self.cfg.mask_ratio 
+
+        return mask_ratio 
 
     def __getitem__(self, index):
         path, target = self.samples[index]
         img_bgr = cv2.imread(path)
+        if self.cfg.make_square: img_bgr = make_square(img_bgr)
+        if self.cfg.rotate_degree: img_bgr = rotate_img(img_bgr, self.cfg.rotate_degree)
 
         img = Image.fromarray(img_bgr.astype(np.uint8))
         sample = self.transform(img)
 
-        return sample, target
+        H, W = sample[0].shape[1] // self.patch_size, sample[0].shape[2] // self.patch_size 
+        high = self.get_mask_ratio() * H * W 
+
+        if self.cfg.mask_shape == 'block':
+            mask = np.zeros((H, W), dtype=bool)
+            mask_count = 0 
+            while mask_count < high:
+                max_mask_patches = high - mask_count 
+
+                delta = 0 
+                for attempt in range(10):
+                    low = (min(H, W) // 3) ** 2 
+                    target_area = random.uniform(low, max_mask_patches)
+                    aspect_ratio = math.exp(random.uniform(*self.log_aspect_ratio))
+                    h = int(round(math.sqrt(target_area * aspect_ratio)))
+                    w = int(round(math.sqrt(target_area / aspect_ratio)))
+                    if w < W and h < H:
+                        top = random.randint(0, H - h)
+                        left = random.randint(0, W - w)
+
+                        num_masked = mask[top:top+h, left:left+w].sum()
+                        if 0 < h * w - num_masked <= max_mask_patches:
+                            for i in range(top, top + h):
+                                for j in range(left, left + w):
+                                    if mask[i, j] == 0:
+                                        mask[i, j] = 1
+                                        delta += 1 
+
+                    if delta > 0:
+                        break 
+
+                if delta == 0:
+                    break 
+                else:
+                    mask_count += delta 
+        else:
+            mask = np.hstack([np.zeros(H * W - int(high)), np.ones(int(high))]).astype(bool)
+            np.random.shuffle(mask)
+            mask = mask.reshape(H, W)
+
+        masks = [mask.flatten() for _ in range(len(sample))]
+
+        return sample, target, masks 
     
 
 class DataAugmentationDINO(object):

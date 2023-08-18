@@ -13,7 +13,7 @@ from torch.utils.data import DistributedSampler, DataLoader
 import torch.distributed as dist 
 
 
-def get_dataloader(cfg, shuffle=True, drop_last=True, logger=None):
+def get_dataloader(input_size, patch_size, cfg, shuffle=True, drop_last=True, logger=None):
     seed = setup_seed()
     if logger: logger.info(f'data loader seed {seed} ------')
 
@@ -26,7 +26,7 @@ def get_dataloader(cfg, shuffle=True, drop_last=True, logger=None):
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)), 
     ])
 
-    dataset = CustomImageFolderDataset(cfg.image_folder, transform, cfg)
+    dataset = CustomImageFolderDataset(cfg, transform, input_size, patch_size)
 
     rank, world_size = get_dist_info()
     sampler = DistSampler(dataset, seed, world_size, rank, shuffle)
@@ -79,12 +79,14 @@ def setup_seed(device='cuda', cuda_deterministic=False):
 
     
 class CustomImageFolderDataset(datasets.ImageFolder):
-    def __init__(self, root, transform, cfg):
-        super(CustomImageFolderDataset, self).__init__(root, transform, cfg)
+    def __init__(self, cfg, transform, input_size, patch_size):
+        super(CustomImageFolderDataset, self).__init__(cfg.image_folder, transform)
+        self.root = cfg.image_folder 
+        self.transform = transform
 
-        self.root = root 
+        self.input_size = input_size
+        self.patch_size = patch_size
         self.cfg = cfg
-        self.transform = transform 
 
     def __getitem__(self, index):
         path, target = self.samples[index]
@@ -93,35 +95,23 @@ class CustomImageFolderDataset(datasets.ImageFolder):
         if np.random.random() < 0.5:
             img_shape = img_bgr.shape 
             side_ratio = np.random.uniform(0.3, 0.7)
-            new_shape = (int(side_ratio * img_shape[0]), int(side_ratio * img_shape[1]))
+            new_shape = (int(side_ratio * img_shape[1]), int(side_ratio * img_shape[0]))
             interpolation = np.random.choice(
                 [cv2.INTER_NEAREST, cv2.INTER_LINEAR, cv2.INTER_AREA, cv2.INTER_CUBIC, cv2.INTER_LANCZOS4]
             )
             img_bgr = cv2.resize(img_bgr, new_shape, interpolation=interpolation)
 
-        img_bgr = cv2.resize(img_bgr, (self.cfg.resize[0], self.cfg.resize[1]))
-
-        if np.random.random() < 0.5:
-            img_shape = img_bgr.shape
-
-            index_h = 0
-            while index_h < img_shape[0]:
-                h_add = np.random.randint(img_shape[0]//2) + 1
-
-                index_w = 0
-                while index_w < img_shape[1]:
-                    w_add = np.random.randint(img_shape[1]//2) + 1
-
-                    if np.random.random() < 0.5:
-                        img_bgr[index_h:index_h+h_add, index_w:index_w+w_add, :] = 112
-
-                    index_w += w_add
-                index_h += h_add 
+        img_bgr = cv2.resize(img_bgr, (self.input_size[1], self.input_size[0]))
 
         img = Image.fromarray(img_bgr.astype(np.uint8))
         sample = self.transform(img)
 
-        return sample, target
+        H, W = self.input_size[0] // self.patch_size, self.input_size[1] // self.patch_size
+        high = int(np.random.uniform(0.0, 0.5) * H * W)
+        mask = np.hstack([np.zeros(H * W - high), np.ones(high)]).astype(bool)
+        np.random.shuffle(mask)
+
+        return sample, target, mask 
 
 
 class DistSampler(DistributedSampler):

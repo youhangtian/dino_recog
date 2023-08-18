@@ -34,19 +34,19 @@ def get_config():
     return cfg
 
 @torch.no_grad()
-def save_model(model, path, name, save_onnx=False):
+def save_model(model, path, name, input_size, save_onnx=False):
     save_path = os.path.join(path, f'{name}.pth')
     torch.save(model.module.state_dict(), save_path)
 
     if save_onnx:
-        img = torch.randn(1, 3, 112, 112).to('cuda')
+        img = torch.randn(1, 3, input_size[0], input_size[1]).to('cuda')
         torch.onnx.export(
             model, 
             img,
             os.path.join(path, f'{name}.onnx'),
             input_names=['input'],
-            output_names=['features'],
-            dynamic_axes={'input': {0: 'batch_size'}, 'features': {0: 'batch_size'}},
+            output_names=['features', 'features_norm'],
+            dynamic_axes={'input': {0: 'batch_size'}, 'features': {0: 'batch_size'}, 'features_norm': {0: 'batch_size'}},
             opset_version=15
         )
 
@@ -74,7 +74,7 @@ def main(cfg):
     if logger: logger.info(f'config: ------\n{cfg} ------')
 
     if logger: logger.info(f'get dataloader ------\n{cfg.data} ------')
-    data_loader = get_dataloader(cfg.data, logger=logger)
+    data_loader = get_dataloader(cfg.model.input_size, cfg.model.patch_size, cfg.data, logger=logger)
 
     if logger: logger.info(f'get backbone: ------\n{cfg.model} ------')
     backbone = get_backbone(cfg.model, logger=logger).cuda()
@@ -132,7 +132,10 @@ def main(cfg):
     if logger: logger.info(f'get megaface dataloaders {face_folders} ------')
 
     for i in range(len(face_folders)):
-        face_dataloader = get_mega_dataloader(cfg.data.megaface_data_root, face_folders[i], cfg.data.batch_size)
+        face_dataloader = get_mega_dataloader(cfg.data.megaface_data_root, 
+                                              face_folders[i], 
+                                              cfg.data.batch_size, 
+                                              cfg.model.input_size)
         face_dataloaders.append(face_dataloader)
 
     best_acc = {name: 0.0 for name in face_folders[:-1]}
@@ -152,20 +155,18 @@ def main(cfg):
                 param.requires_grad = True 
 
         if (epoch % cfg.train.save_epoch == 0) and (RANK == 0):
-            save_model(backbone, cfg.output, f'epoch{epoch}', save_onnx=False)
+            save_model(backbone, cfg.output, f'epoch{epoch}', cfg.model.input_size, save_onnx=False)
 
         data_loader.sampler.set_epoch(epoch)
 
-        for (imgs, labels) in tqdm(data_loader, f'[epoch{epoch}][rank{RANK}]'):
+        for (imgs, labels, masks) in tqdm(data_loader, f'[epoch{epoch}][rank{RANK}]'):
             steps += 1
 
             imgs = imgs.to('cuda')
             labels = labels.to('cuda')
+            masks = masks.to('cuda')
 
-            if 'vit' in cfg.model.network:
-                embeddings, attn = backbone(imgs, return_attention=True)
-            else:
-                embeddings = backbone(imgs)
+            _, embeddings, _, attn = backbone(imgs, masks=masks, return_all=True)
 
             loss = module_partial_fc(embeddings, labels)
 
@@ -210,41 +211,34 @@ def main(cfg):
                         mean = [0.5, 0.5, 0.5]
                         std = [0.5, 0.5, 0.5]
 
+                        input_size = cfg.model.input_size 
+                        patch_size = cfg.model.patch_size
+
                         for j in range(len(img_arr)):
                             img_arr[j] = img_arr[j].transpose([1, 2, 0])
                             img_arr[j] = img_arr[j] * std + mean 
                             img_arr[j] = img_arr[j] * 255
 
-                        concat_img1 = np.concatenate((img_arr[0], img_arr[1])).astype('uint8')
-                        concat_img2 = np.concatenate((img_arr[2], img_arr[3])).astype('uint8')
-                        concat_img1 = concat_img1.copy()
-                        concat_img2 = concat_img2.copy()
-                        cv2.putText(concat_img1, f'{text_arr[0]:.2f}', (0, 122), 0, 1, (255, 255, 0))
-                        cv2.putText(concat_img2, f'{text_arr[1]:.2f}', (0, 122), 0, 1, (255, 255, 0))
-                        concat_img = np.concatenate((concat_img1, concat_img2), axis=1)[:,:,::-1]
+                        concat_img = np.concatenate(img_arr, axis=1).astype('uint8')
+                        concat_img = concat_img.copy()
+                        cv2.putText(concat_img, f'{text_arr[0]:.2f}', (input_size[1] - 20, 20), 0, 1, (255, 255, 0))
+                        cv2.putText(concat_img, f'{text_arr[1]:.2f}', (input_size[1] * 3 - 20, 20), 0, 1, (255, 255, 0))
+                        writer.add_image(f'image/input_face', concat_img[:,:,::-1], steps, dataformats='HWC')
 
-                        writer.add_image(f'train/image', concat_img, steps, dataformats='HWC')
+                        attn = attn.detach().cpu()
+                        attn_arr = torch.cat([attn[idx].unsqueeze(0) for idx in [max_x, max_y, min_x, min_y]])
+                        num, num_heads, _ = attn_arr.shape  
+                        attn_arr = attn_arr.reshape(num, num_heads, input_size[0]//patch_size, input_size[1]//patch_size)
+                        attn_arr = nn.functional.interpolate(attn_arr, scale_factor=patch_size, mode='nearest').numpy()
 
-                        if 'vit' in cfg.model.network:
-                            attn = attn.detach().cpu()
-                            attn_arr = torch.cat([attn[idx].unsqueeze(0) for idx in [max_x, max_y, min_x, min_y]])
-                            num, num_heads, _ = attn_arr.shape 
-                            input_size = cfg.model.input_size 
-                            patch_size = cfg.model.patch_size 
-                            attn_arr = attn_arr.reshape(num, num_heads, input_size[0]//patch_size, input_size[1]//patch_size)
-                            attn_arr = nn.functional.interpolate(attn_arr, scale_factor=patch_size, mode='nearest').numpy()
+                        attn_arr_sum = []
+                        for j in range(len(attn_arr)):
+                            arr_sum = sum(attn_arr[j][k] * 1.0 / num_heads for k in range(num_heads))
+                            arr_sum = arr_sum / arr_sum.max() * 255 
+                            attn_arr_sum.append(arr_sum.astype('uint8'))
 
-                            attn_arr_sum = []
-                            for j in range(len(attn_arr)):
-                                arr_sum = sum(attn_arr[j][k] * 1.0 / num_heads for k in range(num_heads))
-                                arr_sum = arr_sum / arr_sum.max() * 255 
-                                attn_arr_sum.append(arr_sum.astype('uint8'))
-
-                            attn_img1 = np.concatenate((attn_arr_sum[0], attn_arr_sum[1]))
-                            attn_img2 = np.concatenate((attn_arr_sum[2], attn_arr_sum[3]))
-                            attn_concat_img = np.concatenate((attn_img1, attn_img2), axis=1)
-
-                            writer.add_image(f'train/heatmap', attn_concat_img, steps, dataformats='HW')
+                        attn_concat_img = np.concatenate((attn_arr_sum), axis=1)
+                        writer.add_image(f'image/heatmap', attn_concat_img, steps, dataformats='HW')
 
             if (steps % cfg.log_freq == 0) and logger:
                 msg = f'[epoch{epoch}] steps {steps}, lr {last_lr:.6f}, loss {loss_am.avg:.4f} ------'
@@ -256,17 +250,17 @@ def main(cfg):
             backbone.eval()
             acc_arr = get_acc(backbone, cfg.model.network, face_dataloaders[:-1], face_dataloaders[-1], print_info=False)
             for i in range(len(face_folders) - 1):
-                if logger: logger.info(f'[epoch{epoch}][megaface_test][{face_folders[i]}] acc {acc_arr[i]*100:.4f} ------')
-                if writer: writer.add_scalar(f'megaface/{face_folders[i]}', acc_arr[i], epoch)
+                if logger: logger.info(f'[epoch{epoch}][megaface_test][{face_folders[i]}] acc {acc_arr[i]*100:.2f}% ------')
+                if writer: writer.add_scalar(f'train/test_{face_folders[i]}', acc_arr[i], epoch)
 
                 if acc_arr[i] > best_acc[face_folders[i]] and RANK == 0:
                     best_acc[face_folders[i]] = acc_arr[i] 
-                    save_model(backbone, cfg.output, f'best_{face_folders[i]}', save_onnx=True)
+                    save_model(backbone, cfg.output, f'best_{face_folders[i]}', cfg.model.input_size, save_onnx=True)
             backbone.train()
 
     if RANK == 0:
         backbone.eval()
-        save_model(backbone, cfg.output, f'backbone_final', save_onnx=False)
+        save_model(backbone, cfg.output, f'backbone_final', cfg.model.input_size, save_onnx=False)
     if writer: writer.close()
 
     distributed.destroy_process_group()

@@ -10,6 +10,10 @@ def save_model(student, teacher, img_size, path, name, save_onnx=False):
     save_path = os.path.join(path, f'{name}.pth')
     torch.save(save_dict, save_path)
 
+    backbone_save_dict = teacher.backbone.state_dict()
+    backbone_save_path = os.path.join(path, f'{name}_backbone.pth')
+    torch.save(backbone_save_dict, backbone_save_path)
+
     if save_onnx:
         img =  torch.randn(1, 3, img_size[0], img_size[1]).cuda()
         save_path = os.path.join(path, f'{name}.onnx')
@@ -18,20 +22,22 @@ def save_model(student, teacher, img_size, path, name, save_onnx=False):
             img, 
             save_path,
             input_names=['input'],
-            output_names=['features'],
-            dynamic_axes={'input': {0: 'batch_size'}, 'features': {0: 'batch_size'}},
+            output_names=['features', 'features_norm'],
+            dynamic_axes={'input': {0: 'batch_size'}, 'features': {0: 'batch_size'}, 'features_norm': {0: 'batch_size'}},
             opset_version=15
         )
 
 
-def get_model(student, teacher , cfg, logger=None):
-    student = MultiCropWrapper(
-        student,
-        DINOHead(cfg.num_features, cfg.out_dim, norm_last_layer=True)
+def get_model(student_backbone, teacher_backbone , cfg, logger=None):
+    student = DinoWrapper(
+        student_backbone,
+        Head(cfg.num_features, cfg.out_dim, norm_last_layer=True),
+        Head(cfg.num_features, cfg.patch_out_dim, norm_last_layer=True)
     )
-    teacher = MultiCropWrapper(
-        teacher,
-        DINOHead(cfg.num_features, cfg.out_dim)
+    teacher = DinoWrapper(
+        teacher_backbone,
+        Head(cfg.num_features, cfg.out_dim),
+        Head(cfg.num_features, cfg.patch_out_dim)
     )
 
     if cfg.ckpt:
@@ -58,7 +64,7 @@ def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
         return tensor 
 
 
-class DINOHead(nn.Module):
+class Head(nn.Module):
     def __init__(self,
                  in_dim, 
                  out_dim,
@@ -73,15 +79,12 @@ class DINOHead(nn.Module):
             layers.append(nn.GELU())
         layers.append(nn.Linear(hidden_dim, bottleneck_dim))
         self.mlp = nn.Sequential(*layers)
-
         self.apply(self._init_weights)
+
         self.last_layer = nn.utils.weight_norm(nn.Linear(bottleneck_dim, out_dim, bias=False))
         self.last_layer.weight_g.data.fill_(1)
         if norm_last_layer:
             self.last_layer.weight_g.requires_grad = False 
-
-        # self.last_layer = nn.Linear(bottleneck_dim, out_dim, bias=False)
-        # self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -89,40 +92,29 @@ class DINOHead(nn.Module):
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x):    
+    def forward(self, x):  
         x = self.mlp(x)
         x = nn.functional.normalize(x, dim=-1, p=2)
-        x = self.last_layer(x) 
-        return x 
+        output = self.last_layer(x) 
+        return output
         
 
-class MultiCropWrapper(nn.Module):
-    def __init__(self, backbone, head):
-        super(MultiCropWrapper, self).__init__()
+class DinoWrapper(nn.Module):
+    def __init__(self, backbone, head1, head2):
+        super(DinoWrapper, self).__init__()
         self.backbone = backbone 
-        self.head = head 
+        self.head1 = head1
+        self.head2 = head2
 
-    def forward(self, x, return_attention=False):
-        if not isinstance(x, list):
-            x = [x]
+    def forward(self, x, masks=None, return_attention=False):
+        x = torch.cat(x)
+        masks = torch.cat(masks) if masks is not None else None
 
-        idx_crops = torch.cumsum(torch.unique_consecutive(
-            torch.tensor([inp.shape[-1] for inp in x]),
-            return_counts=True,
-        )[1], 0)
-
-        start_idx, output, attn = 0, torch.empty(0).to(x[0].device), torch.empty(0).to(x[0].device)
-        for end_idx in idx_crops:
-            if return_attention:
-                _out = self.backbone(torch.cat(x[start_idx:end_idx]), return_attention=return_attention)
-                output = torch.cat((output, _out[0]))
-                attn = torch.cat((attn, _out[1]))
-            else:
-                _out = self.backbone(torch.cat(x[start_idx:end_idx]))
-                output = torch.cat((output, _out))
-            start_idx = end_idx 
+        features, features_norm, features_all, attn = self.backbone(x, masks, return_all=True)
+        output1 = self.head1(features)
+        output2 = self.head2(features_all[:, 1:])
 
         if return_attention:
-            return self.head(output), attn 
+            return output1, output2, attn 
         else:
-            return self.head(output)
+            return output1, output2
