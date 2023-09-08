@@ -32,12 +32,12 @@ def get_model(student_backbone, teacher_backbone , cfg, logger=None):
     student = DinoWrapper(
         student_backbone,
         Head(cfg.num_features, cfg.out_dim, norm_last_layer=True),
-        Head(cfg.num_features, cfg.patch_out_dim, norm_last_layer=True)
+        Head(student_backbone.embed_dim, cfg.patch_out_dim, norm_last_layer=True)
     )
     teacher = DinoWrapper(
         teacher_backbone,
         Head(cfg.num_features, cfg.out_dim),
-        Head(cfg.num_features, cfg.patch_out_dim)
+        Head(teacher_backbone.embed_dim, cfg.patch_out_dim)
     )
 
     if cfg.ckpt:
@@ -94,7 +94,8 @@ class Head(nn.Module):
 
     def forward(self, x):  
         x = self.mlp(x)
-        x = nn.functional.normalize(x, dim=-1, p=2)
+        eps = 1e-6 if x.dtype == torch.float16 else 1e-12
+        x = nn.functional.normalize(x, dim=-1, p=2, eps=eps)
         output = self.last_layer(x) 
         return output
         
@@ -110,9 +111,9 @@ class DinoWrapper(nn.Module):
         x = torch.cat(x)
         masks = torch.cat(masks) if masks is not None else None
 
-        features, features_norm, features_all, attn = self.backbone(x, masks, return_all=True)
+        features, features_norm, features_patch, attn = self.backbone(x, masks, return_all=True)
         output1 = self.head1(features)
-        output2 = self.head2(features_all[:, 1:])
+        output2 = self.head2(features_patch)
 
         if return_attention:
             return output1, output2, attn 

@@ -112,8 +112,16 @@ def main(cfg):
         len(data_loader)
     )
 
+    lambda2_scheduler = np.concatenate((
+        np.zeros(cfg.train.lambda2_start_epoch * len(data_loader)),
+        np.linspace(0.0,
+                    cfg.train.lambda2,
+                    cfg.train.lambda2_warmup_epochs * len(data_loader)),
+        np.ones(cfg.train.epochs * len(data_loader)) * cfg.train.lambda2
+    ))
+
     face_dataloaders = []
-    face_folders = cfg.data.megaface_face_folders.split(',')
+    face_folders = cfg.data.megaface_face_folders.split(',') if cfg.data.megaface_data_root else []
     if logger: logger.info(f'get megaface dataloaders {face_folders} ------')
 
     for i in range(len(face_folders)):
@@ -155,7 +163,8 @@ def main(cfg):
 
             teacher_output = teacher(images[:cfg.data.global_crops_number], return_attention=True)
             
-            loss1, loss2, loss = dino_loss(student_output_global, student_output_local, masks, teacher_output, epoch)
+            lambda2 = lambda2_scheduler[steps]
+            loss1, loss2, loss = dino_loss(student_output_global, student_output_local, masks, teacher_output, epoch, lambda2)
 
             if not math.isfinite(loss.item()):
                 if logger: logger.error(f'loss is {loss.item()}, stopping training ------')
@@ -173,14 +182,13 @@ def main(cfg):
                 fp16_scaler.unscale_(optimizer)
 
             for name, p in student.named_parameters():
-                clip_grad = 3.0
                 if p.grad is not None:
                     param_norm = p.grad.data.norm(2)
-                    clip_coef = clip_grad / (param_norm + 1e-6)
+                    clip_coef = cfg.train.clip_grad / (param_norm + 1e-6)
                     if clip_coef < 1:
                         p.grad.data.mul_(clip_coef)
 
-                if epoch < cfg.train.lock_last_layer:
+                if epoch < cfg.train.freeze_last_layer:
                     if 'last_layer' in name:
                         p.grad = None 
 

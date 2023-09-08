@@ -30,7 +30,7 @@ class DINOLoss(nn.Module):
             np.ones(cfg.epochs - cfg.warmup_teacher_temp_epochs) * cfg.teacher_temp
         ))
 
-    def forward(self, student_output_global, student_output_local, student_masks, teacher_output, epoch):
+    def forward(self, student_output_global, student_output_local, student_masks, teacher_output, epoch, lambda2):
         student_global_cls, student_patch = student_output_global[0], student_output_global[1]
         student_local_cls = student_output_local[0]
         student_cls = torch.cat([student_global_cls, student_local_cls])
@@ -48,6 +48,8 @@ class DINOLoss(nn.Module):
         teacher_patch_c = F.softmax((teacher_patch - self.center2) / temp, dim=-1)
         teacher_patch_c = teacher_patch_c.detach().chunk(self.global_crops_number) 
 
+        attn_arr = teacher_output[-1].detach().chunk(self.global_crops_number)
+
         total_loss1, total_loss2 = 0, 0
         n_loss_terms1, n_loss_terms2 = 0, 0
         for q in range(len(teacher_cls_c)):
@@ -55,16 +57,26 @@ class DINOLoss(nn.Module):
                 if v == q:
                     loss2 = torch.sum(-teacher_patch_c[q] * F.log_softmax(student_patch_c[v], dim=-1), dim=-1)
                     mask = student_masks[v]
-                    loss2 = torch.sum(loss2 * mask.float(), dim=-1) / mask.sum(dim=-1).clamp(min=1.0)
+
+                    attn_weight = attn_arr[q]
+                    attn_weight_mean = attn_weight.mean(axis=1)
+                    attn_weight_mean = torch.where(mask, attn_weight_mean, 0.0)
+                    attn_weight_mean_sum = attn_weight_mean.sum(axis=1).unsqueeze(1) 
+                    mask_weight = attn_weight_mean / attn_weight_mean_sum.clamp(min=1e-9)
+                    loss2 = torch.sum(loss2 * mask.float() * mask_weight, dim=-1)
+
+                    # loss2 = torch.sum(loss2 * mask.float(), dim=-1) / mask.sum(dim=-1).clamp(min=1.0)
+
                     total_loss2 += loss2.mean()
                     n_loss_terms2 += 1
                 else:
                     loss1 = torch.sum(-teacher_cls_c[q] * F.log_softmax(student_cls_c[v], dim=-1), dim=-1)
+
                     total_loss1 += loss1.mean()
                     n_loss_terms1 += 1
 
         total_loss1 = total_loss1 / n_loss_terms1 * self.lambda1
-        total_loss2 = total_loss2 / n_loss_terms2 * self.lambda2 
+        total_loss2 = total_loss2 / n_loss_terms2 * lambda2
         total_loss = total_loss1 + total_loss2 
         self.update_center(teacher_cls, teacher_patch)
         return total_loss1, total_loss2, total_loss 

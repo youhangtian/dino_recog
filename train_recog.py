@@ -86,10 +86,6 @@ def main(cfg):
         bucket_cap_mb=16
     )
 
-    backbone.eval()
-    for param in backbone.parameters():
-        param.requires_grad = False
-
     if logger: logger.info(f'get partial fc, margin_loss {cfg.train.loss} ------')
     margin_loss = get_loss(cfg.train.loss, cfg.train.margin_list)
     num_classes = len(os.listdir(cfg.data.image_folder))
@@ -106,14 +102,14 @@ def main(cfg):
     if cfg.train.optimizer == 'sgd':
         opt = torch.optim.SGD(
             params=[{'params': backbone.parameters()}, {'params': module_partial_fc.parameters()}],
-            lr=cfg.train.lr,
+            lr=cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
             momentum=cfg.train.momentum,
             weight_decay=cfg.train.weight_decay
         )
     elif cfg.train.optimizer == 'adamw':
         opt = torch.optim.AdamW(
             params=[{'params': backbone.parameters()}, {'params': module_partial_fc.parameters()}],
-            lr=cfg.train.lr,
+            lr=cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
             weight_decay=cfg.train.weight_decay
         )
     else:
@@ -122,13 +118,13 @@ def main(cfg):
     if logger: logger.info(f'get lr scheduler ------')
     lr_scheduler = PolyScheduler(
         optimizer=opt,
-        base_lr=cfg.train.lr,
+        base_lr=cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
         max_steps=cfg.train.num_epoch*len(data_loader),
         warmup_steps=cfg.train.warmup_epoch*len(data_loader)
     )
 
     face_dataloaders = []
-    face_folders = cfg.data.megaface_face_folders.split(',')
+    face_folders = cfg.data.megaface_face_folders.split(',') if cfg.data.megaface_data_root else []
     if logger: logger.info(f'get megaface dataloaders {face_folders} ------')
 
     for i in range(len(face_folders)):
@@ -149,11 +145,6 @@ def main(cfg):
     for epoch in range(-1*cfg.train.lock_epoch, cfg.train.num_epoch, 1):
         if logger: logger.info(f'epoch {epoch} begin ------')
 
-        if epoch == 0:
-            backbone.train()
-            for param in backbone.parameters():
-                param.requires_grad = True 
-
         if (epoch % cfg.train.save_epoch == 0) and (RANK == 0):
             save_model(backbone, cfg.output, f'epoch{epoch}', cfg.model.input_size, save_onnx=False)
 
@@ -167,6 +158,9 @@ def main(cfg):
             masks = masks.to('cuda')
 
             _, embeddings, _, attn = backbone(imgs, masks=masks, return_all=True)
+
+            if epoch < 0:
+                embeddings = embeddings.detach()
 
             loss = module_partial_fc(embeddings, labels)
 

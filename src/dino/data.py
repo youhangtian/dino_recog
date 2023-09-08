@@ -98,10 +98,7 @@ class CustomImageFolderDataset(datasets.ImageFolder):
     def set_epoch(self, epoch):
         self.epoch = epoch 
 
-    def get_mask_ratio(self):
-        if self.epoch < self.cfg.mask_start_epoch:
-            return 0 
-        
+    def get_mask_ratio(self):        
         assert self.cfg.mask_ratio > self.cfg.mask_ratio_var 
 
         mask_ratio = random.uniform(

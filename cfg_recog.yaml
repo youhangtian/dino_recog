@@ -15,6 +15,7 @@ model:
   fp16: True 
   input_size: [112, 112]
   patch_size: 8
+  freeze_patch_embed: True
   num_features: 512 
   ckpt: False 
 
@@ -23,9 +24,9 @@ train:
   save_epoch: 10
   lock_epoch: 0
   warmup_epoch: 10
-  lr: 1.e-3
+  lr: 5.e-4
   loss: arcface
   margin_list: [64.0, 0.4]
   optimizer: adamw 
   momentum: 0.9 
-  weight_decay: 0.0001
+  weight_decay: 1.e-4

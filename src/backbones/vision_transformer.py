@@ -150,6 +150,7 @@ class VisionTransformer(nn.Module):
                  fp16=False,
                  input_size=(224, 224),
                  patch_size=16,
+                 freeze_patch_embed=False,
                  in_chans=3,
                  num_features=512,
                  embed_dim=768,
@@ -166,6 +167,7 @@ class VisionTransformer(nn.Module):
         self.fp16 = fp16
         self.input_size = input_size
         self.patch_size = patch_size
+        self.freeze_patch_embed = freeze_patch_embed
         self.num_features = num_features 
         self.embed_dim = embed_dim 
 
@@ -205,6 +207,15 @@ class VisionTransformer(nn.Module):
         nn.init.normal_(self.cls_token, std=1e-6)
         self.apply(self._init_weights)
 
+        val = math.sqrt(6. / float(3 * self.patch_embed.patch_size ** 2 + self.embed_dim))
+        nn.init.uniform_(self.patch_embed.proj.weight, -val, val)
+        nn.init.zeros_(self.patch_embed.proj.bias)
+
+        if self.freeze_patch_embed:
+            self.mask_token.requires_grad = False 
+            self.patch_embed.proj.weight.requires_grad = False 
+            self.patch_embed.proj.bias.requires_grad = False 
+
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
@@ -237,9 +248,11 @@ class VisionTransformer(nn.Module):
     
     def prepare_tokens(self, x, masks=None):
         B, C, H, W = x.shape 
+
         x = self.patch_embed(x)
         if masks is not None:
             x = torch.where(masks.unsqueeze(-1), self.mask_token.to(x.dtype).unsqueeze(0), x) 
+        if self.freeze_patch_embed: x = x.detach()
 
         cls_tokens = self.cls_token.expand(B, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
@@ -254,18 +267,18 @@ class VisionTransformer(nn.Module):
                 x, attn = blk(x)
             x = self.norm(x)
 
-            features_all = self.features(x)
-            features = features_all[:, 0]
+            features = self.features(x[:, 0])
+            features_patch = x[:, 1:]
             attn = attn[:, :, 0, 1:]
 
         if self.fp16:
-            features_all = features_all.float()
             features = features.float()
+            features_patch = features_patch.float()
             attn = attn.float()
 
         features_norm = nn.functional.normalize(features, dim=-1, p=2)
         
         if return_all:
-            return features, features_norm, features_all, attn
+            return features, features_norm, features_patch, attn
         else:
             return features, features_norm
