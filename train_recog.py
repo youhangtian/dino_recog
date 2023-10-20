@@ -12,14 +12,13 @@ from torch import nn
 from torch import distributed 
 from torch.utils.tensorboard import SummaryWriter 
 
-from src.utils import get_config_from_yaml, get_logger, AverageMeter 
+from src.utils import get_config_from_yaml, get_logger, cosine_scheduler, AverageMeter 
 from src.backbones import get_backbone 
 from src.megaface_test import get_mega_dataloader, get_acc 
 
 from src.recog.data import get_dataloader
 from src.recog.losses import get_loss
 from src.recog.partial_fc import PartialFC 
-from src.recog.lr_scheduler import PolyScheduler
 
 def get_config():
     parser = argparse.ArgumentParser(description='training argument parser')
@@ -102,25 +101,30 @@ def main(cfg):
     if cfg.train.optimizer == 'sgd':
         opt = torch.optim.SGD(
             params=[{'params': backbone.parameters()}, {'params': module_partial_fc.parameters()}],
-            lr=cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
+            # lr=cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
+            lr=cfg.train.lr,
             momentum=cfg.train.momentum,
             weight_decay=cfg.train.weight_decay
         )
     elif cfg.train.optimizer == 'adamw':
         opt = torch.optim.AdamW(
             params=[{'params': backbone.parameters()}, {'params': module_partial_fc.parameters()}],
-            lr=cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
+            # lr=cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
+            lr=cfg.train.lr, 
             weight_decay=cfg.train.weight_decay
         )
     else:
         raise ValueError(f'no such optimizer {cfg.train.optimizer}')
 
     if logger: logger.info(f'get lr scheduler ------')
-    lr_scheduler = PolyScheduler(
-        optimizer=opt,
-        base_lr=cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
-        max_steps=cfg.train.num_epoch*len(data_loader),
-        warmup_steps=cfg.train.warmup_epoch*len(data_loader)
+    lr_scheduler = cosine_scheduler(
+        # cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
+        cfg.train.lr, 
+        cfg.train.lr_end,
+        cfg.train.epochs,
+        len(data_loader),
+        warmup_epochs=cfg.train.warmup_epochs,
+        lock_epochs=cfg.train.lock_epochs
     )
 
     face_dataloaders = []
@@ -142,7 +146,7 @@ def main(cfg):
     scaler = torch.cuda.amp.grad_scaler.GradScaler()
 
     steps = -1
-    for epoch in range(-1*cfg.train.lock_epoch, cfg.train.num_epoch, 1):
+    for epoch in range(-1*cfg.train.lock_epochs, cfg.train.epochs, 1):
         if logger: logger.info(f'epoch {epoch} begin ------')
 
         if (epoch % cfg.train.save_epoch == 0) and (RANK == 0):
@@ -152,6 +156,8 @@ def main(cfg):
 
         for (imgs, labels, masks) in tqdm(data_loader, f'[epoch{epoch}][rank{RANK}]'):
             steps += 1
+            for i, param_group in enumerate(opt.param_groups):
+                param_group['lr'] = lr_scheduler[steps]
 
             imgs = imgs.to('cuda')
             labels = labels.to('cuda')
@@ -165,7 +171,7 @@ def main(cfg):
             loss = module_partial_fc(embeddings, labels)
 
             if not math.isfinite(loss.item()):
-                logger.error(f'loss is {loss.item()}, stopping training ------')
+                if logger: logger.error(f'loss is {loss.item()}, stopping training ------')
                 sys.exit(1)
 
             opt.zero_grad()
@@ -179,14 +185,12 @@ def main(cfg):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(backbone.parameters(), 5)
                 opt.step() 
-            
-            last_lr = lr_scheduler.get_last_lr()[0]
 
             with torch.no_grad():
                 if loss_am: loss_am.update(loss.item())
 
                 if writer:
-                    writer.add_scalar(f'train/learning_rate', last_lr, steps)
+                    writer.add_scalar(f'train/learning_rate', opt.param_groups[0]['lr'], steps)
                     writer.add_scalar(f'train/loss', loss_am.val, steps)
 
                     if steps % cfg.image_writer_freq == 0:
@@ -235,10 +239,8 @@ def main(cfg):
                         writer.add_image(f'image/heatmap', attn_concat_img, steps, dataformats='HW')
 
             if (steps % cfg.log_freq == 0) and logger:
-                msg = f'[epoch{epoch}] steps {steps}, lr {last_lr:.6f}, loss {loss_am.avg:.4f} ------'
+                msg = f'[epoch{epoch}] steps {steps}, lr {opt.param_groups[0]["lr"]:.6f}, loss {loss_am.avg:.4f} ------'
                 logger.info(msg)
-
-            if epoch >=0: lr_scheduler.step()
 
         if len(face_folders) > 1 and RANK == 0:
             backbone.eval()

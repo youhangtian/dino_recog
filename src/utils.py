@@ -3,7 +3,7 @@ import sys
 import yaml
 from yacs.config import CfgNode
 import logging, logging.handlers
-
+import numpy as np 
 
 def get_config_from_yaml(yaml_file):
     def get_node(dict_val):
@@ -42,6 +42,30 @@ def get_logger(log_dir, log_file='log.txt'):
     logger.addHandler(stream_handler)
 
     return logger
+
+
+def cosine_scheduler(base_value,
+                     final_value,
+                     epochs,
+                     niter_per_ep,
+                     warmup_epochs=0,
+                     lock_epochs=0):
+    warmup_schedule = np.array([])
+    warmup_iters = warmup_epochs * niter_per_ep 
+    if warmup_epochs > 0:
+        warmup_schedule = np.linspace(final_value, base_value, warmup_iters)
+
+    lock_schedule = np.array([])
+    lock_iters = lock_epochs * niter_per_ep 
+    if lock_epochs > 0:
+        lock_schedule = np.array([base_value] * lock_iters)
+
+    iters = np.arange(epochs * niter_per_ep - warmup_iters)
+    schedule = final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * iters / len(iters)))
+
+    schedule = np.concatenate((warmup_schedule, lock_schedule, schedule))
+    assert len(schedule) == (epochs + lock_epochs) * niter_per_ep 
+    return schedule
 
 
 class AverageMeter():

@@ -201,6 +201,7 @@ class VisionTransformer(nn.Module):
         self.norm = norm_layer(embed_dim)
 
         self.features = nn.Linear(embed_dim, num_features, bias=False)
+        self.f_norm = norm_layer(num_features)
 
         trunc_normal_(self.pos_embed, std=.02)
         # trunc_normal_(self.cls_token, std=.02)
@@ -267,7 +268,7 @@ class VisionTransformer(nn.Module):
                 x, attn = blk(x)
             x = self.norm(x)
 
-            features = self.features(x[:, 0])
+            features = self.f_norm(self.features(x[:, 0]))
             features_patch = x[:, 1:]
             attn = attn[:, :, 0, 1:]
 

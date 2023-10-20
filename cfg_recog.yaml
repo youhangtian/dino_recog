@@ -3,9 +3,9 @@ log_freq: 100
 image_writer_freq: 100 
 
 data:
-  batch_size: 64
+  batch_size: 32
   num_workers: 16
-  image_folder: /mnt/data/faces/glint360k
+  image_folder: /mnt/data/faces/ms1m
   megaface_data_root: /mnt/data/megaface_clean
   megaface_face_folders: faces,facescrub_images,megaface_images
   sample_rate: 1.0
@@ -20,11 +20,12 @@ model:
   ckpt: False 
 
 train:
-  num_epoch: 100 
+  epochs: 100 
   save_epoch: 10
-  lock_epoch: 0
-  warmup_epoch: 10
-  lr: 5.e-4
+  lock_epochs: 0
+  warmup_epochs: 10
+  lr: 1.e-3
+  lr_end: 1.e-6
   loss: arcface
   margin_list: [64.0, 0.4]
   optimizer: adamw 

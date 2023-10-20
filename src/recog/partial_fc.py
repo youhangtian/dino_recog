@@ -110,7 +110,7 @@ class PartialFC(torch.nn.Module):
         loss: torch.Tensor
             pass
         """
-        local_labels = local_labels.view(-1)
+        local_labels.squeeze_()
         local_labels = local_labels.long()
 
         batch_size = local_embeddings.size(0)

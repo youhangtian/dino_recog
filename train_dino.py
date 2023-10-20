@@ -13,13 +13,13 @@ from torch.utils.tensorboard import SummaryWriter
 
 import matplotlib.pyplot as plt
 
-from src.utils import get_config_from_yaml, get_logger, AverageMeter
+from src.utils import get_config_from_yaml, get_logger, cosine_scheduler, AverageMeter
 from src.backbones import get_backbone
 from src.megaface_test import get_mega_dataloader, get_acc
 
 from src.dino.model import get_model, save_model 
 from src.dino.data import get_dataloader 
-from src.dino.utils import cosine_scheduler, get_params_groups 
+from src.dino.utils import get_params_groups 
 from src.dino.loss import DINOLoss
 
 def get_config():
@@ -91,7 +91,8 @@ def main(cfg):
         raise ValueError(f'do not support optimiizer {cfg.train.optimizer}')
     
     lr_scheduler = cosine_scheduler(
-        cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
+        # cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
+        cfg.train.lr, 
         cfg.train.lr_end,
         cfg.train.epochs,
         len(data_loader),

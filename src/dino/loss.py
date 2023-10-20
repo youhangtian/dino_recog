@@ -75,8 +75,8 @@ class DINOLoss(nn.Module):
                     total_loss1 += loss1.mean()
                     n_loss_terms1 += 1
 
-        total_loss1 = total_loss1 / n_loss_terms1 * self.lambda1
-        total_loss2 = total_loss2 / n_loss_terms2 * lambda2
+        if n_loss_terms1: total_loss1 = total_loss1 / n_loss_terms1 * self.lambda1
+        if n_loss_terms2: total_loss2 = total_loss2 / n_loss_terms2 * lambda2
         total_loss = total_loss1 + total_loss2 
         self.update_center(teacher_cls, teacher_patch)
         return total_loss1, total_loss2, total_loss 
