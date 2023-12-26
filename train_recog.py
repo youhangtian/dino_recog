@@ -17,8 +17,7 @@ from src.backbones import get_backbone
 from src.megaface_test import get_mega_dataloader, get_acc 
 
 from src.recog.data import get_dataloader
-from src.recog.losses import get_loss
-from src.recog.partial_fc import PartialFC 
+from src.recog.circle_loss import CircleLoss 
 
 def get_config():
     parser = argparse.ArgumentParser(description='training argument parser')
@@ -85,31 +84,36 @@ def main(cfg):
         bucket_cap_mb=16
     )
 
-    if logger: logger.info(f'get partial fc, margin_loss {cfg.train.loss} ------')
-    margin_loss = get_loss(cfg.train.loss, cfg.train.margin_list)
+    if logger: logger.info(f'get partial fc, gamma: {cfg.train.gamma}, m: {cfg.train.m} ------')
     num_classes = len(os.listdir(cfg.data.image_folder))
-    module_partial_fc = PartialFC(
-        margin_loss, 
+    circle_loss = CircleLoss(
+        cfg.train.gamma,
+        cfg.train.m,  
         cfg.model.num_features, 
         num_classes, 
-        cfg.data.sample_rate,
+        cfg.train.sample_rate,
         cfg.model.fp16
     )
-    module_partial_fc.train().cuda()
+    circle_loss.train().cuda()
+
+    circle_loss = torch.nn.parallel.DistributedDataParallel(
+        module=circle_loss,
+        broadcast_buffers=False,
+        device_ids=[RANK],
+        bucket_cap_mb=16
+    )
 
     if logger: logger.info(f'get optimizer: {cfg.train.optimizer} ------')
     if cfg.train.optimizer == 'sgd':
         opt = torch.optim.SGD(
-            params=[{'params': backbone.parameters()}, {'params': module_partial_fc.parameters()}],
-            # lr=cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
+            params=[{'params': backbone.parameters()}, {'params': circle_loss.parameters()}],
             lr=cfg.train.lr,
             momentum=cfg.train.momentum,
             weight_decay=cfg.train.weight_decay
         )
     elif cfg.train.optimizer == 'adamw':
         opt = torch.optim.AdamW(
-            params=[{'params': backbone.parameters()}, {'params': module_partial_fc.parameters()}],
-            # lr=cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
+            params=[{'params': backbone.parameters()}, {'params': circle_loss.parameters()}],
             lr=cfg.train.lr, 
             weight_decay=cfg.train.weight_decay
         )
@@ -118,7 +122,6 @@ def main(cfg):
 
     if logger: logger.info(f'get lr scheduler ------')
     lr_scheduler = cosine_scheduler(
-        # cfg.train.lr * (cfg.data.batch_size * WORLD_SIZE) / 256.,
         cfg.train.lr, 
         cfg.train.lr_end,
         cfg.train.epochs,
@@ -168,7 +171,7 @@ def main(cfg):
             if epoch < 0:
                 embeddings = embeddings.detach()
 
-            loss = module_partial_fc(embeddings, labels)
+            loss = circle_loss(embeddings, labels)
 
             if not math.isfinite(loss.item()):
                 if logger: logger.error(f'loss is {loss.item()}, stopping training ------')

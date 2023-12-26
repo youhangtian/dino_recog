@@ -8,7 +8,6 @@ data:
   image_folder: /mnt/data/faces/ms1m
   megaface_data_root: /mnt/data/megaface_clean
   megaface_face_folders: faces,facescrub_images,megaface_images
-  sample_rate: 1.0
 
 model:
   network: vit_s
@@ -26,8 +25,9 @@ train:
   warmup_epochs: 10
   lr: 1.e-3
   lr_end: 1.e-6
-  loss: arcface
-  margin_list: [64.0, 0.4]
+  gamma: 256 
+  m: 0.25 
+  sample_rate: 0.25
   optimizer: adamw 
   momentum: 0.9 
   weight_decay: 1.e-4
